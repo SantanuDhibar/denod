@@ -4,7 +4,7 @@ const XPATH: string = Deno.env.get("XPATH") || "xhttp";      // Node path
 const DOMAIN: string = Deno.env.get("DOMAIN") || "denod.santanudhibar.deno.net";         // The domain name assigned by /deno is required, without the https://prefix, for example: xxxx.deno.dev
 const NAME: string = Deno.env.get("NAME") || "Deno";         // name
 const PORT: number = parseInt(Deno.env.get("PORT") || "3000"); 
-const IS_DENO_DEPLOY = Boolean(Deno.env.get("DENO_DEPLOYMENT_ID") || Deno.env.get("DENO_REGION"));
+const IS_DENO_DEPLOY = !!(Deno.env.get("DENO_DEPLOYMENT_ID") || Deno.env.get("DENO_REGION"));
 
 interface Settings {
   UUID: string;
@@ -58,6 +58,16 @@ function parse_uuid(uuid: string): Uint8Array {
     r[index] = parseInt(uuid.substr(index * 2, 2), 16);
   }
   return r;
+}
+
+function createTimeoutSignal(ms: number): AbortSignal {
+  if (typeof AbortSignal.timeout === "function") {
+    return AbortSignal.timeout(ms);
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  controller.signal.addEventListener("abort", () => clearTimeout(timer), { once: true });
+  return controller.signal;
 }
 
 async function read_vless_header(
@@ -162,9 +172,6 @@ async function parse_header(
 async function connect_remote(hostname: string, port: number): Promise<Deno.Conn> {
   const timeout = 8000;
   try {
-    if (IS_DENO_DEPLOY) {
-      throw new Error("TCP proxying is not supported on Deno Deploy");
-    }
     const conn = await Deno.connect({ hostname, port });
     return conn;
   } catch (err) {
@@ -189,7 +196,7 @@ function pipe_relay() {
         preventClose: false,
         preventAbort: false,
         preventCancel: false,
-        signal: AbortSignal.timeout(SETTINGS.SESSION_TIMEOUT),
+        signal: createTimeoutSignal(SETTINGS.SESSION_TIMEOUT),
       });
     } catch (err) {
       throw err;
@@ -385,7 +392,7 @@ let IP = DOMAIN;
 if (!DOMAIN) {
   try {
     const response = await fetch("https://ipv4.ip.sb", {
-      signal: AbortSignal.timeout(2000),
+      signal: createTimeoutSignal(2000),
     });
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
@@ -394,7 +401,7 @@ if (!DOMAIN) {
   } catch (err) {
     try {
       const response = await fetch("https://ipv6.ip.sb", {
-        signal: AbortSignal.timeout(1000),
+        signal: createTimeoutSignal(1000),
       });
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
