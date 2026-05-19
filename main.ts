@@ -3,10 +3,9 @@ const SUB_PATH: string = Deno.env.get("SUB_PATH") || "sub";  // Get subscription
 const XPATH: string = Deno.env.get("XPATH") || "xhttp";      // Node path
 const DOMAIN: string = Deno.env.get("DOMAIN") || "nxhack.deno.dev";         // The domain name assigned by /deno is required, without the https://prefix, for example: xxxx.deno.dev
 const NAME: string = Deno.env.get("NAME") || "Deno";         // name
-const PORT_ENV: string | undefined = Deno.env.get("PORT");
-const PORT: number = parseInt(PORT_ENV || "3000"); 
-const IS_DENO_DEPLOY: boolean = Deno.env.get("DENO_DEPLOYMENT_ID") !== undefined;
-const HAS_TCP: boolean = !IS_DENO_DEPLOY && typeof Deno.connect === "function";
+const PORT: number = parseInt(Deno.env.get("PORT") || "3000"); 
+const HAS_TCP: boolean = typeof Deno.connect === "function";
+const IS_DENO_DEPLOY: boolean = Deno.env.get("DENO_DEPLOYMENT_ID") !== undefined && !HAS_TCP;
 
 interface Settings {
   UUID: string;
@@ -499,9 +498,12 @@ const handler = async (req: Request): Promise<Response> => {
     return new Response("Not Found", { status: 404 });
   };
 
-const serveOptions = PORT_ENV ? { port: PORT, onListen: () => {
-    console.log(`Server is running on port ${PORT}`);
-  } } : {};
+const serveOptions: Deno.ServeOptions = {
+  ...(IS_DENO_DEPLOY ? {} : { port: PORT }),
+  onListen: ({ port }) => {
+    console.log(`Server is running on port ${port}`);
+  },
+};
 
 Deno.serve(serveOptions, handler);
     
