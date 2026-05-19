@@ -1,11 +1,11 @@
-import { serve } from "https://deno.land/std/http/server.ts";
-
 const UUID: string = Deno.env.get("UUID") || "f9a1ba12-7187-4b25-a5d5-7bafd82ffb4d";
 const SUB_PATH: string = Deno.env.get("SUB_PATH") || "sub";  // Get subscription path
 const XPATH: string = Deno.env.get("XPATH") || "xhttp";      // Node path
 const DOMAIN: string = Deno.env.get("DOMAIN") || "denod.santanudhibar.deno.net";         // The domain name assigned by /deno is required, without the https://prefix, for example: xxxx.deno.dev
 const NAME: string = Deno.env.get("NAME") || "Deno";         // name
 const PORT: number = parseInt(Deno.env.get("PORT") || "3000"); 
+const IS_DENO_DEPLOY = Deno.env.get("DENO_DEPLOYMENT_ID") !== undefined ||
+  Deno.env.get("DENO_REGION") !== undefined;
 
 interface Settings {
   UUID: string;
@@ -59,6 +59,27 @@ function parse_uuid(uuid: string): Uint8Array {
     r[index] = parseInt(uuid.substr(index * 2, 2), 16);
   }
   return r;
+}
+
+function createTimeoutController(
+  timeoutMs: number
+): { controller: AbortController; timeoutId: ReturnType<typeof setTimeout> } {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  return { controller, timeoutId };
+}
+
+async function fetchTextWithTimeout(url: string, timeoutMs: number): Promise<string> {
+  const { controller, timeoutId } = createTimeoutController(timeoutMs);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    return (await response.text()).trim();
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 async function read_vless_header(
@@ -182,15 +203,16 @@ function pipe_relay() {
       writer.releaseLock();
     }
 
+    const { controller, timeoutId } = createTimeoutController(SETTINGS.SESSION_TIMEOUT);
     try {
       await src.pipeTo(dest, {
         preventClose: false,
         preventAbort: false,
         preventCancel: false,
-        signal: AbortSignal.timeout(SETTINGS.SESSION_TIMEOUT),
+        signal: controller.signal,
       });
-    } catch (err) {
-      throw err;
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
   return pump;
@@ -382,20 +404,11 @@ try {
 let IP = DOMAIN;
 if (!DOMAIN) {
   try {
-    const p = Deno.run({
-      cmd: ["curl", "-s", "--max-time", "2", "ipv4.ip.sb"],
-      stdout: "piped",
-    });
-    const output = await p.output();
-    IP = new TextDecoder().decode(output).trim();
+    IP = await fetchTextWithTimeout("https://ipv4.ip.sb", 2000);
   } catch (err) {
     try {
-      const p = Deno.run({
-        cmd: ["curl", "-s", "--max-time", "1", "ipv6.ip.sb"],
-        stdout: "piped",
-      });
-      const output = await p.output();
-      IP = `[${new TextDecoder().decode(output).trim()}]`;
+      const ipv6 = await fetchTextWithTimeout("https://ipv6.ip.sb", 1000);
+      IP = `[${ipv6}]`;
     } catch (ipv6Err) {
       IP = "localhost";
     }
@@ -407,94 +420,104 @@ function generatePadding(min: number, max: number): string {
   return btoa(Array(length).fill("X").join(""));
 }
 
-serve(
-  async (req: Request): Promise<Response> => {
-    const url = new URL(req.url);
-    const path = url.pathname;
+const handler = async (req: Request): Promise<Response> => {
+  const url = new URL(req.url);
+  const path = url.pathname;
 
-    const headers = {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST",
-      "Cache-Control": "no-store",
-      "X-Accel-Buffering": "no",
-      "X-Padding": generatePadding(100, 1000),
-    };
+  const headers = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST",
+    "Cache-Control": "no-store",
+    "X-Accel-Buffering": "no",
+    "X-Padding": generatePadding(100, 1000),
+  };
 
-    if (path === "/") { 
-      return new Response("Hello, World\n", 
-      { status: 200, 
-        headers: { "Content-Type": "text/plain" }, }); 
-    } 
+  if (path === "/") { 
+    return new Response("Hello, World\n", 
+    { status: 200, 
+      headers: { "Content-Type": "text/plain" }, }); 
+  } 
 
-    if (path === `/${SUB_PATH}`) {
-      const vlessURL = `vless://${UUID}@${IP}:443?encryption=none&security=tls&sni=${IP}&fp=chrome&allowInsecure=1&type=xhttp&host=${IP}&path=${SETTINGS.XPATH}&mode=packet-up#${NAME}-${ISP}`;
-      const base64Content = btoa(vlessURL);
-      return new Response(base64Content + "\n", {
-        status: 200,
-        headers: { "Content-Type": "text/plain" },
-      });
-    }
+  if (path === `/${SUB_PATH}`) {
+    const vlessURL = `vless://${UUID}@${IP}:443?encryption=none&security=tls&sni=${IP}&fp=chrome&allowInsecure=1&type=xhttp&host=${IP}&path=${SETTINGS.XPATH}&mode=packet-up#${NAME}-${ISP}`;
+    const base64Content = btoa(vlessURL);
+    return new Response(base64Content + "\n", {
+      status: 200,
+      headers: { "Content-Type": "text/plain" },
+    });
+  }
 
-    const pathMatch = path.match(new RegExp(`/${XPATH}/([^/]+)(?:/([0-9]+))?$`));
-    if (!pathMatch) {
-      return new Response("Not Found", { status: 404 });
-    }
-
-    const uuid = pathMatch[1];
-    const seq = pathMatch[2] ? parseInt(pathMatch[2]) : null;
-
-    if (req.method === "GET" && !seq) {
-      let session = sessions.get(uuid);
-      if (!session) {
-        session = new Session(uuid);
-        sessions.set(uuid, session);
-      }
-
-      session.downstreamStarted = true;
-      const { readable, writable } = new TransformStream();
-      session.startDownstream({ writable });
-
-      return new Response(readable, {
-        status: 200,
-        headers: {
-          ...headers,
-          "Content-Type": "application/octet-stream",
-          "Transfer-Encoding": "chunked",
-        },
-      });
-    }
-
-    if (req.method === "POST" && seq !== null) {
-      let session = sessions.get(uuid);
-      if (!session) {
-        session = new Session(uuid);
-        sessions.set(uuid, session);
-
-        setTimeout(() => {
-          const currentSession = sessions.get(uuid);
-          if (currentSession && !currentSession.downstreamStarted) {
-            currentSession.cleanup();
-            sessions.delete(uuid);
-          }
-        }, SETTINGS.SESSION_TIMEOUT);
-      }
-
-      const data = await req.arrayBuffer();
-      const buffer = new Uint8Array(data);
-
-      try {
-        await session.processPacket(seq, buffer);
-        return new Response(null, { status: 200, headers });
-      } catch (err) {
-        session.cleanup();
-        sessions.delete(uuid);
-        return new Response(null, { status: 500 });
-      }
-    }
+  const pathMatch = path.match(new RegExp(`/${XPATH}/([^/]+)(?:/([0-9]+))?$`));
+  if (!pathMatch) {
     return new Response("Not Found", { status: 404 });
-  },
-  { port: PORT, onListen: () => {
-    console.log(`Server is running on port ${PORT}`);
-  } }
-);
+  }
+
+  if (IS_DENO_DEPLOY) {
+    return new Response("TCP proxy functionality is not supported on Deno Deploy", { status: 501 });
+  }
+
+  const uuid = pathMatch[1];
+  const seq = pathMatch[2] ? parseInt(pathMatch[2]) : null;
+
+  if (req.method === "GET" && !seq) {
+    let session = sessions.get(uuid);
+    if (!session) {
+      session = new Session(uuid);
+      sessions.set(uuid, session);
+    }
+
+    session.downstreamStarted = true;
+    const { readable, writable } = new TransformStream();
+    session.startDownstream({ writable });
+
+    return new Response(readable, {
+      status: 200,
+      headers: {
+        ...headers,
+        "Content-Type": "application/octet-stream",
+        "Transfer-Encoding": "chunked",
+      },
+    });
+  }
+
+  if (req.method === "POST" && seq !== null) {
+    let session = sessions.get(uuid);
+    if (!session) {
+      session = new Session(uuid);
+      sessions.set(uuid, session);
+
+      setTimeout(() => {
+        const currentSession = sessions.get(uuid);
+        if (currentSession && !currentSession.downstreamStarted) {
+          currentSession.cleanup();
+          sessions.delete(uuid);
+        }
+      }, SETTINGS.SESSION_TIMEOUT);
+    }
+
+    const data = await req.arrayBuffer();
+    const buffer = new Uint8Array(data);
+
+    try {
+      await session.processPacket(seq, buffer);
+      return new Response(null, { status: 200, headers });
+    } catch (err) {
+      session.cleanup();
+      sessions.delete(uuid);
+      return new Response(null, { status: 500 });
+    }
+  }
+  return new Response("Not Found", { status: 404 });
+};
+
+if (IS_DENO_DEPLOY) {
+  Deno.serve(handler);
+} else {
+  Deno.serve(
+    { port: PORT, onListen: () => {
+      console.log(`Server is running on port ${PORT}`);
+    } },
+    handler
+  );
+}
   
