@@ -1,11 +1,10 @@
-import { serve } from "https://deno.land/std/http/server.ts";
-
 const UUID: string = Deno.env.get("UUID") || "f9a1ba12-7187-4b25-a5d5-7bafd82ffb4d";
 const SUB_PATH: string = Deno.env.get("SUB_PATH") || "sub";  // Get subscription path
 const XPATH: string = Deno.env.get("XPATH") || "xhttp";      // Node path
 const DOMAIN: string = Deno.env.get("DOMAIN") || "denod.santanudhibar.deno.net";         // The domain name assigned by /deno is required, without the https://prefix, for example: xxxx.deno.dev
 const NAME: string = Deno.env.get("NAME") || "Deno";         // name
 const PORT: number = parseInt(Deno.env.get("PORT") || "3000"); 
+const IS_DENO_DEPLOY = Boolean(Deno.env.get("DENO_DEPLOYMENT_ID") || Deno.env.get("DENO_REGION"));
 
 interface Settings {
   UUID: string;
@@ -163,6 +162,9 @@ async function parse_header(
 async function connect_remote(hostname: string, port: number): Promise<Deno.Conn> {
   const timeout = 8000;
   try {
+    if (IS_DENO_DEPLOY) {
+      throw new Error("TCP proxying is not supported on Deno Deploy");
+    }
     const conn = await Deno.connect({ hostname, port });
     return conn;
   } catch (err) {
@@ -382,20 +384,22 @@ try {
 let IP = DOMAIN;
 if (!DOMAIN) {
   try {
-    const p = Deno.run({
-      cmd: ["curl", "-s", "--max-time", "2", "ipv4.ip.sb"],
-      stdout: "piped",
+    const response = await fetch("https://ipv4.ip.sb", {
+      signal: AbortSignal.timeout(2000),
     });
-    const output = await p.output();
-    IP = new TextDecoder().decode(output).trim();
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    IP = (await response.text()).trim();
   } catch (err) {
     try {
-      const p = Deno.run({
-        cmd: ["curl", "-s", "--max-time", "1", "ipv6.ip.sb"],
-        stdout: "piped",
+      const response = await fetch("https://ipv6.ip.sb", {
+        signal: AbortSignal.timeout(1000),
       });
-      const output = await p.output();
-      IP = `[${new TextDecoder().decode(output).trim()}]`;
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      IP = `[${(await response.text()).trim()}]`;
     } catch (ipv6Err) {
       IP = "localhost";
     }
@@ -407,94 +411,104 @@ function generatePadding(min: number, max: number): string {
   return btoa(Array(length).fill("X").join(""));
 }
 
-serve(
-  async (req: Request): Promise<Response> => {
-    const url = new URL(req.url);
-    const path = url.pathname;
+const handler = async (req: Request): Promise<Response> => {
+  const url = new URL(req.url);
+  const path = url.pathname;
 
-    const headers = {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST",
-      "Cache-Control": "no-store",
-      "X-Accel-Buffering": "no",
-      "X-Padding": generatePadding(100, 1000),
-    };
+  const headers = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST",
+    "Cache-Control": "no-store",
+    "X-Accel-Buffering": "no",
+    "X-Padding": generatePadding(100, 1000),
+  };
 
-    if (path === "/") { 
-      return new Response("Hello, World\n", 
-      { status: 200, 
-        headers: { "Content-Type": "text/plain" }, }); 
-    } 
+  if (path === "/") { 
+    return new Response("Hello, World\n", 
+    { status: 200, 
+      headers: { "Content-Type": "text/plain" }, }); 
+  } 
 
-    if (path === `/${SUB_PATH}`) {
-      const vlessURL = `vless://${UUID}@${IP}:443?encryption=none&security=tls&sni=${IP}&fp=chrome&allowInsecure=1&type=xhttp&host=${IP}&path=${SETTINGS.XPATH}&mode=packet-up#${NAME}-${ISP}`;
-      const base64Content = btoa(vlessURL);
-      return new Response(base64Content + "\n", {
-        status: 200,
-        headers: { "Content-Type": "text/plain" },
-      });
-    }
+  if (path === `/${SUB_PATH}`) {
+    const vlessURL = `vless://${UUID}@${IP}:443?encryption=none&security=tls&sni=${IP}&fp=chrome&allowInsecure=1&type=xhttp&host=${IP}&path=${SETTINGS.XPATH}&mode=packet-up#${NAME}-${ISP}`;
+    const base64Content = btoa(vlessURL);
+    return new Response(base64Content + "\n", {
+      status: 200,
+      headers: { "Content-Type": "text/plain" },
+    });
+  }
 
-    const pathMatch = path.match(new RegExp(`/${XPATH}/([^/]+)(?:/([0-9]+))?$`));
-    if (!pathMatch) {
-      return new Response("Not Found", { status: 404 });
-    }
-
-    const uuid = pathMatch[1];
-    const seq = pathMatch[2] ? parseInt(pathMatch[2]) : null;
-
-    if (req.method === "GET" && !seq) {
-      let session = sessions.get(uuid);
-      if (!session) {
-        session = new Session(uuid);
-        sessions.set(uuid, session);
-      }
-
-      session.downstreamStarted = true;
-      const { readable, writable } = new TransformStream();
-      session.startDownstream({ writable });
-
-      return new Response(readable, {
-        status: 200,
-        headers: {
-          ...headers,
-          "Content-Type": "application/octet-stream",
-          "Transfer-Encoding": "chunked",
-        },
-      });
-    }
-
-    if (req.method === "POST" && seq !== null) {
-      let session = sessions.get(uuid);
-      if (!session) {
-        session = new Session(uuid);
-        sessions.set(uuid, session);
-
-        setTimeout(() => {
-          const currentSession = sessions.get(uuid);
-          if (currentSession && !currentSession.downstreamStarted) {
-            currentSession.cleanup();
-            sessions.delete(uuid);
-          }
-        }, SETTINGS.SESSION_TIMEOUT);
-      }
-
-      const data = await req.arrayBuffer();
-      const buffer = new Uint8Array(data);
-
-      try {
-        await session.processPacket(seq, buffer);
-        return new Response(null, { status: 200, headers });
-      } catch (err) {
-        session.cleanup();
-        sessions.delete(uuid);
-        return new Response(null, { status: 500 });
-      }
-    }
+  const pathMatch = path.match(new RegExp(`/${XPATH}/([^/]+)(?:/([0-9]+))?$`));
+  if (!pathMatch) {
     return new Response("Not Found", { status: 404 });
-  },
-  { port: PORT, onListen: () => {
-    console.log(`Server is running on port ${PORT}`);
-  } }
-);
+  }
+
+  if (IS_DENO_DEPLOY) {
+    return new Response("TCP proxying is not supported on Deno Deploy", { status: 501 });
+  }
+
+  const uuid = pathMatch[1];
+  const seq = pathMatch[2] ? parseInt(pathMatch[2]) : null;
+
+  if (req.method === "GET" && !seq) {
+    let session = sessions.get(uuid);
+    if (!session) {
+      session = new Session(uuid);
+      sessions.set(uuid, session);
+    }
+
+    session.downstreamStarted = true;
+    const { readable, writable } = new TransformStream();
+    session.startDownstream({ writable });
+
+    return new Response(readable, {
+      status: 200,
+      headers: {
+        ...headers,
+        "Content-Type": "application/octet-stream",
+        "Transfer-Encoding": "chunked",
+      },
+    });
+  }
+
+  if (req.method === "POST" && seq !== null) {
+    let session = sessions.get(uuid);
+    if (!session) {
+      session = new Session(uuid);
+      sessions.set(uuid, session);
+
+      setTimeout(() => {
+        const currentSession = sessions.get(uuid);
+        if (currentSession && !currentSession.downstreamStarted) {
+          currentSession.cleanup();
+          sessions.delete(uuid);
+        }
+      }, SETTINGS.SESSION_TIMEOUT);
+    }
+
+    const data = await req.arrayBuffer();
+    const buffer = new Uint8Array(data);
+
+    try {
+      await session.processPacket(seq, buffer);
+      return new Response(null, { status: 200, headers });
+    } catch (err) {
+      session.cleanup();
+      sessions.delete(uuid);
+      return new Response(null, { status: 500 });
+    }
+  }
+  return new Response("Not Found", { status: 404 });
+};
+
+if (IS_DENO_DEPLOY) {
+  Deno.serve(handler);
+} else {
+  Deno.serve(
+    { port: PORT, onListen: () => {
+      console.log(`Server is running on port ${PORT}`);
+    } },
+    handler
+  );
+}
   
