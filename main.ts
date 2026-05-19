@@ -3,7 +3,8 @@ const SUB_PATH: string = Deno.env.get("SUB_PATH") || "sub";  // Get subscription
 const XPATH: string = Deno.env.get("XPATH") || "xhttp";      // Node path
 const DOMAIN: string = Deno.env.get("DOMAIN") || "nxhack.deno.dev";         // The domain name assigned by /deno is required, without the https://prefix, for example: xxxx.deno.dev
 const NAME: string = Deno.env.get("NAME") || "Deno";         // name
-const PORT: number = parseInt(Deno.env.get("PORT") || "3000"); 
+const PORT_ENV: string | undefined = Deno.env.get("PORT");
+const PORT: number = parseInt(PORT_ENV || "3000"); 
 const IS_DEPLOY: boolean = Deno.env.get("DENO_DEPLOYMENT_ID") !== undefined;
 const HAS_TCP: boolean = !IS_DEPLOY && typeof Deno.connect === "function";
 
@@ -162,9 +163,6 @@ async function parse_header(
 
 async function connect_remote(hostname: string, port: number): Promise<Deno.Conn> {
   const timeout = 8000;
-  if (!HAS_TCP) {
-    throw new Error("TCP connections are not supported in this runtime");
-  }
   try {
     const conn = await Deno.connect({ hostname, port });
     return conn;
@@ -501,11 +499,11 @@ const handler = async (req: Request): Promise<Response> => {
     return new Response("Not Found", { status: 404 });
   };
 
-if (IS_DEPLOY) {
-  Deno.serve(handler);
-} else {
+if (PORT_ENV) {
   Deno.serve({ port: PORT, onListen: () => {
     console.log(`Server is running on port ${PORT}`);
   } }, handler);
+} else {
+  Deno.serve(handler);
 }
     
