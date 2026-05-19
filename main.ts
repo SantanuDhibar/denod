@@ -60,14 +60,18 @@ function parse_uuid(uuid: string): Uint8Array {
   return r;
 }
 
-function createTimeoutSignal(ms: number): AbortSignal {
-  if (typeof AbortSignal.timeout === "function") {
-    return AbortSignal.timeout(ms);
-  }
+async function fetchTextWithTimeout(url: string, timeoutMs: number): Promise<string> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), ms);
-  controller.signal.addEventListener("abort", () => clearTimeout(timer), { once: true });
-  return controller.signal;
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    return (await response.text()).trim();
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 async function read_vless_header(
@@ -191,15 +195,19 @@ function pipe_relay() {
       writer.releaseLock();
     }
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), SETTINGS.SESSION_TIMEOUT);
     try {
       await src.pipeTo(dest, {
         preventClose: false,
         preventAbort: false,
         preventCancel: false,
-        signal: createTimeoutSignal(SETTINGS.SESSION_TIMEOUT),
+        signal: controller.signal,
       });
     } catch (err) {
       throw err;
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
   return pump;
@@ -391,22 +399,11 @@ try {
 let IP = DOMAIN;
 if (!DOMAIN) {
   try {
-    const response = await fetch("https://ipv4.ip.sb", {
-      signal: createTimeoutSignal(2000),
-    });
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-    IP = (await response.text()).trim();
+    IP = await fetchTextWithTimeout("https://ipv4.ip.sb", 2000);
   } catch (err) {
     try {
-      const response = await fetch("https://ipv6.ip.sb", {
-        signal: createTimeoutSignal(1000),
-      });
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      IP = `[${(await response.text()).trim()}]`;
+      const ipv6 = await fetchTextWithTimeout("https://ipv6.ip.sb", 1000);
+      IP = `[${ipv6}]`;
     } catch (ipv6Err) {
       IP = "localhost";
     }
@@ -451,7 +448,7 @@ const handler = async (req: Request): Promise<Response> => {
   }
 
   if (IS_DENO_DEPLOY) {
-    return new Response("TCP proxying is not supported on Deno Deploy", { status: 501 });
+    return new Response("TCP proxy functionality via the xhttp endpoint is not supported on Deno Deploy", { status: 501 });
   }
 
   const uuid = pathMatch[1];
