@@ -4,8 +4,8 @@ const XPATH: string = Deno.env.get("XPATH") || "xhttp";      // Node path
 const DOMAIN: string = Deno.env.get("DOMAIN") || "nxhack.deno.dev";         // The domain name assigned by /deno is required, without the https://prefix, for example: xxxx.deno.dev
 const NAME: string = Deno.env.get("NAME") || "Deno";         // name
 const PORT: number = parseInt(Deno.env.get("PORT") || "3000"); 
-const HAS_TCP: boolean = typeof Deno.connect === "function";
-const IS_DENO_DEPLOY: boolean = Deno.env.get("DENO_DEPLOYMENT_ID") !== undefined && !HAS_TCP;
+const IS_DENO_DEPLOY: boolean = Deno.env.get("DENO_DEPLOYMENT_ID") !== undefined;
+const HAS_TCP: boolean = typeof Deno.connect === "function" && !IS_DENO_DEPLOY;
 
 interface Settings {
   UUID: string;
@@ -409,6 +409,12 @@ function generatePadding(min: number, max: number): string {
   return btoa(Array(length).fill("X").join(""));
 }
 
+async function drainRequestBody(req: Request): Promise<void> {
+  if (req.body) {
+    await req.arrayBuffer();
+  }
+}
+
 const handler = async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const path = url.pathname;
@@ -438,9 +444,7 @@ const handler = async (req: Request): Promise<Response> => {
 
     const isProxyPath = path.startsWith(`/${XPATH}/`);
     if (isProxyPath && !HAS_TCP) {
-      if (req.method === "POST") {
-        await req.arrayBuffer();
-      }
+      await drainRequestBody(req);
       return new Response("TCP proxying is not supported in this runtime.", { status: 501, headers: responseHeaders });
     }
 
@@ -507,7 +511,8 @@ const serveOptions: Deno.ServeOptions = {
   ...(IS_DENO_DEPLOY ? {} : { port: PORT }),
   onListen: ({ port }) => {
     const deployLabel = IS_DENO_DEPLOY ? " (Deno Deploy)" : "";
-    console.log(`Server is running on port ${port}${deployLabel}`);
+    const portLabel = port ? ` on port ${port}` : "";
+    console.log(`Server is running${portLabel}${deployLabel}`);
   },
 };
 
