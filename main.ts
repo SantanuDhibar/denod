@@ -3,7 +3,7 @@ import { serve } from "https://deno.land/std/http/server.ts";
 const UUID: string = Deno.env.get("UUID") || "f9a1ba12-7187-4b25-a5d5-7bafd82ffb4d";
 const SUB_PATH: string = Deno.env.get("SUB_PATH") || "sub";  // Get subscription path
 const XPATH: string = Deno.env.get("XPATH") || "xhttp";      // Node path
-const DOMAIN: string = Deno.env.get("DOMAIN") || "nxhack.deno.dev";         // The domain name assigned by /deno is required, without the https://prefix, for example: xxxx.deno.dev
+const DOMAIN: string = Deno.env.get("DOMAIN") || "denod.santanudhibar.deno.net";         // The domain name assigned by /deno is required, without the https://prefix, for example: xxxx.deno.dev
 const NAME: string = Deno.env.get("NAME") || "Deno";         // name
 const PORT: number = parseInt(Deno.env.get("PORT") || "3000"); 
 
