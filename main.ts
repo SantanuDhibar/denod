@@ -274,7 +274,7 @@ const handler = async (req: Request): Promise<Response> => {
 const serveOptions: Deno.ServeOptions = {
   ...(IS_DENO_DEPLOY ? {} : { port: PORT }),
   onListen: ({ port }) => {
-    const deployLabel = IS_DENO_DEPLOY ? " (Deno Deploy)" : "";
+    const deployLabel = IS_DENO_DEPLOY ? " (Deno Deploy)" : "Deno Deploy";
     const portLabel = port ? ` on port ${port}` : "";
     console.log(`Server is running${portLabel}${deployLabel}`);
   },
