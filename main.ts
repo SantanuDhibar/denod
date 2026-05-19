@@ -436,12 +436,17 @@ const handler = async (req: Request): Promise<Response> => {
       });
     }
 
+    const isProxyPath = path.startsWith(`/${XPATH}/`);
+    if (isProxyPath && !HAS_TCP) {
+      if (req.method === "POST") {
+        await req.arrayBuffer();
+      }
+      return new Response("TCP proxying is not supported in this runtime.", { status: 501, headers: responseHeaders });
+    }
+
     const pathMatch = path.match(new RegExp(`/${XPATH}/([^/]+)(?:/([0-9]+))?$`));
     if (!pathMatch) {
       return new Response("Not Found", { status: 404 });
-    }
-    if (!HAS_TCP) {
-      return new Response("TCP proxying is not supported in this runtime.", { status: 501, headers: responseHeaders });
     }
 
     const uuid = pathMatch[1];
@@ -501,7 +506,8 @@ const handler = async (req: Request): Promise<Response> => {
 const serveOptions: Deno.ServeOptions = {
   ...(IS_DENO_DEPLOY ? {} : { port: PORT }),
   onListen: ({ port }) => {
-    console.log(`Server is running on port ${port}`);
+    const deployLabel = IS_DENO_DEPLOY ? " (Deno Deploy)" : "";
+    console.log(`Server is running on port ${port}${deployLabel}`);
   },
 };
 
