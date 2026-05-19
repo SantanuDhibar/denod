@@ -4,7 +4,8 @@ const XPATH: string = Deno.env.get("XPATH") || "xhttp";      // Node path
 const DOMAIN: string = Deno.env.get("DOMAIN") || "denod.santanudhibar.deno.net";         // The domain name assigned by /deno is required, without the https://prefix, for example: xxxx.deno.dev
 const NAME: string = Deno.env.get("NAME") || "Deno";         // name
 const PORT: number = parseInt(Deno.env.get("PORT") || "3000"); 
-const IS_DENO_DEPLOY = !!(Deno.env.get("DENO_DEPLOYMENT_ID") || Deno.env.get("DENO_REGION"));
+const IS_DENO_DEPLOY = Deno.env.get("DENO_DEPLOYMENT_ID") !== undefined ||
+  Deno.env.get("DENO_REGION") !== undefined;
 
 interface Settings {
   UUID: string;
@@ -60,7 +61,9 @@ function parse_uuid(uuid: string): Uint8Array {
   return r;
 }
 
-function createTimeoutController(timeoutMs: number): { controller: AbortController; timeoutId: number } {
+function createTimeoutController(
+  timeoutMs: number
+): { controller: AbortController; timeoutId: ReturnType<typeof setTimeout> } {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   return { controller, timeoutId };
@@ -444,13 +447,13 @@ const handler = async (req: Request): Promise<Response> => {
     });
   }
 
-  if (IS_DENO_DEPLOY && path.startsWith(`/${XPATH}/`)) {
-    return new Response("TCP proxy functionality is not supported on Deno Deploy", { status: 501 });
-  }
-
   const pathMatch = path.match(new RegExp(`/${XPATH}/([^/]+)(?:/([0-9]+))?$`));
   if (!pathMatch) {
     return new Response("Not Found", { status: 404 });
+  }
+
+  if (IS_DENO_DEPLOY) {
+    return new Response("TCP proxy functionality is not supported on Deno Deploy", { status: 501 });
   }
 
   const uuid = pathMatch[1];
