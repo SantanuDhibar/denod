@@ -1,11 +1,11 @@
-import { serve } from "https://deno.land/std/http/server.ts";
-
 const UUID: string = Deno.env.get("UUID") || "f9a1ba12-7187-4b25-a5d5-7bafd82ffb4d";
 const SUB_PATH: string = Deno.env.get("SUB_PATH") || "sub";  // Get subscription path
 const XPATH: string = Deno.env.get("XPATH") || "xhttp";      // Node path
 const DOMAIN: string = Deno.env.get("DOMAIN") || "nxhack.deno.dev";         // The domain name assigned by /deno is required, without the https://prefix, for example: xxxx.deno.dev
 const NAME: string = Deno.env.get("NAME") || "Deno";         // name
 const PORT: number = parseInt(Deno.env.get("PORT") || "3000"); 
+const IS_DEPLOY: boolean = Deno.env.get("DENO_DEPLOYMENT_ID") !== undefined;
+const HAS_TCP: boolean = !IS_DEPLOY && typeof Deno.connect === "function";
 
 interface Settings {
   UUID: string;
@@ -162,6 +162,9 @@ async function parse_header(
 
 async function connect_remote(hostname: string, port: number): Promise<Deno.Conn> {
   const timeout = 8000;
+  if (!HAS_TCP) {
+    throw new Error("TCP connections are not supported in this runtime");
+  }
   try {
     const conn = await Deno.connect({ hostname, port });
     return conn;
@@ -382,20 +385,22 @@ try {
 let IP = DOMAIN;
 if (!DOMAIN) {
   try {
-    const p = Deno.run({
-      cmd: ["curl", "-s", "--max-time", "2", "ipv4.ip.sb"],
-      stdout: "piped",
+    const response = await fetch("https://ipv4.ip.sb", {
+      signal: AbortSignal.timeout(2000),
     });
-    const output = await p.output();
-    IP = new TextDecoder().decode(output).trim();
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    IP = (await response.text()).trim();
   } catch (err) {
     try {
-      const p = Deno.run({
-        cmd: ["curl", "-s", "--max-time", "1", "ipv6.ip.sb"],
-        stdout: "piped",
+      const response = await fetch("https://ipv6.ip.sb", {
+        signal: AbortSignal.timeout(1000),
       });
-      const output = await p.output();
-      IP = `[${new TextDecoder().decode(output).trim()}]`;
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      IP = `[${(await response.text()).trim()}]`;
     } catch (ipv6Err) {
       IP = "localhost";
     }
@@ -407,8 +412,7 @@ function generatePadding(min: number, max: number): string {
   return btoa(Array(length).fill("X").join(""));
 }
 
-serve(
-  async (req: Request): Promise<Response> => {
+const handler = async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const path = url.pathname;
 
@@ -438,6 +442,9 @@ serve(
     const pathMatch = path.match(new RegExp(`/${XPATH}/([^/]+)(?:/([0-9]+))?$`));
     if (!pathMatch) {
       return new Response("Not Found", { status: 404 });
+    }
+    if (!HAS_TCP) {
+      return new Response("TCP proxying is not supported in this runtime.", { status: 501, headers });
     }
 
     const uuid = pathMatch[1];
@@ -492,9 +499,13 @@ serve(
       }
     }
     return new Response("Not Found", { status: 404 });
-  },
-  { port: PORT, onListen: () => {
+  };
+
+if (IS_DEPLOY) {
+  Deno.serve(handler);
+} else {
+  Deno.serve({ port: PORT, onListen: () => {
     console.log(`Server is running on port ${PORT}`);
-  } }
-);
+  } }, handler);
+}
     
