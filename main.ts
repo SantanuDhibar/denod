@@ -60,9 +60,14 @@ function parse_uuid(uuid: string): Uint8Array {
   return r;
 }
 
-async function fetchTextWithTimeout(url: string, timeoutMs: number): Promise<string> {
+function createTimeoutController(timeoutMs: number): { controller: AbortController; timeoutId: number } {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  return { controller, timeoutId };
+}
+
+async function fetchTextWithTimeout(url: string, timeoutMs: number): Promise<string> {
+  const { controller, timeoutId } = createTimeoutController(timeoutMs);
   try {
     const response = await fetch(url, { signal: controller.signal });
     if (!response.ok) {
@@ -195,8 +200,7 @@ function pipe_relay() {
       writer.releaseLock();
     }
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), SETTINGS.SESSION_TIMEOUT);
+    const { controller, timeoutId } = createTimeoutController(SETTINGS.SESSION_TIMEOUT);
     try {
       await src.pipeTo(dest, {
         preventClose: false,
@@ -440,13 +444,13 @@ const handler = async (req: Request): Promise<Response> => {
     });
   }
 
+  if (IS_DENO_DEPLOY && path.startsWith(`/${XPATH}/`)) {
+    return new Response("TCP proxy functionality is not supported on Deno Deploy", { status: 501 });
+  }
+
   const pathMatch = path.match(new RegExp(`/${XPATH}/([^/]+)(?:/([0-9]+))?$`));
   if (!pathMatch) {
     return new Response("Not Found", { status: 404 });
-  }
-
-  if (IS_DENO_DEPLOY) {
-    return new Response("TCP proxy functionality is not supported on Deno Deploy", { status: 501 });
   }
 
   const uuid = pathMatch[1];
