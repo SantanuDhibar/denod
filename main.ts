@@ -1,401 +1,171 @@
-const UUID: string = Deno.env.get("UUID") || "f9a1ba12-7187-4b25-a5d5-7bafd82ffb4d";
-const SUB_PATH: string = Deno.env.get("SUB_PATH") || "sub";  // Get subscription path
-const XPATH: string = Deno.env.get("XPATH") || "xhttp";      // Node path
-const DOMAIN: string = Deno.env.get("DOMAIN") || "denod.santanudhibar.deno.net";         // The domain name assigned by /deno is required, without the https://prefix, for example: xxxx.deno.dev
-const NAME: string = Deno.env.get("NAME") || "Deno";         // name
-const PORT: number = parseInt(Deno.env.get("PORT") || "3000"); 
-const IS_DENO_DEPLOY: boolean = Deno.env.get("DENO_DEPLOYMENT_ID") !== undefined;
-const HAS_TCP: boolean = typeof Deno.connect === "function" && !IS_DENO_DEPLOY;
+import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-interface Settings {
-  UUID: string;
-  LOG_LEVEL: "none" | "debug" | "info" | "warn" | "error";
-  BUFFER_SIZE: number;
-  XPATH: string;
-  MAX_BUFFERED_POSTS: number;
-  MAX_POST_SIZE: number;
-  SESSION_TIMEOUT: number;
-  CHUNK_SIZE: number;
-  TCP_NODELAY: boolean;
-  TCP_KEEPALIVE: boolean;
+const UUID = Deno.env.get("UUID") || "f9a1ba12-7187-4b25-a5d5-7bafd82ffb4d";
+const DOMAIN = Deno.env.get("DOMAIN") || "denod.santanudhibar.deno.dev";
+const WS_PATH = Deno.env.get("WS_PATH") || "ws";
+const SUB_PATH = Deno.env.get("SUB_PATH") || "sub";
+const PORT = parseInt(Deno.env.get("PORT") || "3000");
+
+// ---------------- UUID utils ----------------
+
+function parseUUID(uuid: string): Uint8Array {
+  uuid = uuid.replace(/-/g, "");
+  const out = new Uint8Array(16);
+  for (let i = 0; i < 16; i++) {
+    out[i] = parseInt(uuid.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
 }
 
-const SETTINGS: Settings = {
-  UUID,
-  LOG_LEVEL: "none",
-  BUFFER_SIZE: 2048,
-  XPATH: `%2F${XPATH}`,
-  MAX_BUFFERED_POSTS: 30,
-  MAX_POST_SIZE: 1000000,
-  SESSION_TIMEOUT: 30000,
-  CHUNK_SIZE: 1024 * 1024,
-  TCP_NODELAY: true,
-  TCP_KEEPALIVE: true,
-};
-
-function validate_uuid(left: Uint8Array, right: Uint8Array): boolean {
+function uuidEqual(a: Uint8Array, b: Uint8Array): boolean {
   for (let i = 0; i < 16; i++) {
-    if (left[i] !== right[i]) return false;
+    if (a[i] !== b[i]) return false;
   }
   return true;
 }
 
-function concat_typed_arrays(...args: Uint8Array[]): Uint8Array {
-  let len = 0;
-  for (const a of args) len += a.length;
-  const r = new Uint8Array(len);
-  let offset = 0;
-  for (const a of args) {
-    r.set(a, offset);
-    offset += a.length;
+// ---------------- VLESS header parser ----------------
+
+async function parseVLESSHeader(data: Uint8Array) {
+  const version = data[0];
+  const id = data.slice(1, 17);
+
+  if (!uuidEqual(id, parseUUID(UUID))) {
+    throw new Error("Invalid UUID");
   }
-  return r;
-}
 
-function parse_uuid(uuid: string): Uint8Array {
-  uuid = uuid.replaceAll("-", "");
-  const r = new Uint8Array(16);
-  for (let index = 0; index < 16; index++) {
-    r[index] = parseInt(uuid.substr(index * 2, 2), 16);
-  }
-  return r;
-}
+  const optLen = data[17];
+  const cmd = data[18 + optLen];
 
-async function read_vless_header(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  cfg_uuid_str: string
-): Promise<{
-  hostname: string;
-  port: number;
-  data: Uint8Array;
-  resp: Uint8Array;
-}> {
-  let readed_len = 0;
-  let header = new Uint8Array();
+  if (cmd !== 1) throw new Error("Only TCP supported");
 
-  async function inner_read_until(offset: number): Promise<void> {
-    while (readed_len < offset) {
-      const { value, done } = await reader.read();
-      if (done) throw new Error("header length too short");
-      header = concat_typed_arrays(header, value!);
-      readed_len += value!.length;
+  const portIndex = 19 + optLen;
+  const port = (data[portIndex] << 8) + data[portIndex + 1];
+  const addrType = data[portIndex + 2];
+
+  let host = "";
+  let addrIndex = portIndex + 3;
+
+  if (addrType === 1) {
+    host = `${data[addrIndex]}.${data[addrIndex + 1]}.${data[addrIndex + 2]}.${data[addrIndex + 3]}`;
+    addrIndex += 4;
+  } else if (addrType === 2) {
+    const len = data[addrIndex];
+    addrIndex++;
+    host = new TextDecoder().decode(data.slice(addrIndex, addrIndex + len));
+    addrIndex += len;
+  } else if (addrType === 3) {
+    const parts = [];
+    for (let i = 0; i < 8; i++) {
+      parts.push(
+        ((data[addrIndex + i * 2] << 8) + data[addrIndex + i * 2 + 1]).toString(16)
+      );
     }
+    host = parts.join(":");
+    addrIndex += 16;
   }
 
-  await inner_read_until(1 + 16 + 1);
-
-  const version = header[0];
-  const uuid = header.slice(1, 1 + 16);
-  const cfg_uuid = parse_uuid(cfg_uuid_str);
-  if (!validate_uuid(uuid, cfg_uuid)) {
-    throw new Error("invalid UUID");
-  }
-  const pb_len = header[1 + 16];
-  const addr_plus1 = 1 + 16 + 1 + pb_len + 1 + 2 + 1;
-  await inner_read_until(addr_plus1 + 1);
-
-  const cmd = header[1 + 16 + 1 + pb_len];
-  const COMMAND_TYPE_TCP = 1;
-  if (cmd !== COMMAND_TYPE_TCP) {
-    throw new Error(`unsupported command: ${cmd}`);
-  }
-
-  const port = (header[addr_plus1 - 1 - 2] << 8) + header[addr_plus1 - 1 - 1];
-  const atype = header[addr_plus1 - 1];
-
-  const ADDRESS_TYPE_IPV4 = 1;
-  const ADDRESS_TYPE_STRING = 2;
-  const ADDRESS_TYPE_IPV6 = 3;
-  let header_len = -1;
-  if (atype === ADDRESS_TYPE_IPV4) {
-    header_len = addr_plus1 + 4;
-  } else if (atype === ADDRESS_TYPE_IPV6) {
-    header_len = addr_plus1 + 16;
-  } else if (atype === ADDRESS_TYPE_STRING) {
-    header_len = addr_plus1 + 1 + header[addr_plus1];
-  }
-  if (header_len < 0) {
-    throw new Error("read address type failed");
-  }
-  await inner_read_until(header_len);
-
-  const idx = addr_plus1;
-  let hostname = "";
-  if (atype === ADDRESS_TYPE_IPV4) {
-    hostname = Array.from(header.slice(idx, idx + 4))
-      .map((b) => b.toString())
-      .join(".");
-  } else if (atype === ADDRESS_TYPE_STRING) {
-    hostname = new TextDecoder().decode(header.slice(idx + 1, idx + 1 + header[idx]));
-  } else if (atype === ADDRESS_TYPE_IPV6) {
-    hostname = Array.from({ length: 8 }, (_, i) =>
-      ((header[idx + i * 2] << 8) + header[idx + i * 2 + 1]).toString(16)
-    ).join(":");
-  }
-
-  if (!hostname) {
-    throw new Error("parse hostname failed");
-  }
+  const rest = data.slice(addrIndex);
 
   return {
-    hostname,
+    version,
+    host,
     port,
-    data: header.slice(header_len),
-    resp: new Uint8Array([version, 0]),
+    rest,
   };
 }
 
-async function parse_header(
-  uuid_str: string,
-  client: { readable: ReadableStream<Uint8Array> }
-): Promise<any> {
-  const reader = client.readable.getReader();
-  try {
-    const vless = await read_vless_header(reader, uuid_str);
-    return vless;
-  } catch (err) {
-    throw new Error(`read vless header error: ${err.message}`);
-  } finally {
-    reader.releaseLock();
-  }
-}
+// ---------------- WebSocket handler ----------------
 
-async function connect_remote(hostname: string, port: number): Promise<Deno.Conn> {
-  const timeout = 8000;
-  try {
-    const conn = await Deno.connect({ hostname, port });
-    return conn;
-  } catch (err) {
-    throw err;
-  }
-}
+async function handleWS(req: Request): Promise<Response> {
+  const { socket, response } = Deno.upgradeWebSocket(req);
 
-function pipe_relay() {
-  async function pump(
-    src: ReadableStream<Uint8Array>,
-    dest: WritableStream<Uint8Array>,
-    first_packet: Uint8Array
-  ): Promise<void> {
-    if (first_packet.length > 0) {
-      const writer = dest.getWriter();
-      await writer.write(first_packet);
-      writer.releaseLock();
-    }
-
+  socket.onmessage = async (event) => {
     try {
-      await src.pipeTo(dest, {
-        preventClose: false,
-        preventAbort: false,
-        preventCancel: false,
-        signal: AbortSignal.timeout(SETTINGS.SESSION_TIMEOUT),
+      const data = new Uint8Array(event.data);
+
+      const vless = await parseVLESSHeader(data);
+
+      const conn = await Deno.connect({
+        hostname: vless.host,
+        port: vless.port,
       });
-    } catch (err) {
-      throw err;
-    }
-  }
-  return pump;
-}
 
-function relay(
-  cfg: Settings,
-  client: { readable: ReadableStream<Uint8Array>; writable: WritableStream<Uint8Array> },
-  remote: Deno.Conn,
-  vless: { data: Uint8Array; resp: Uint8Array }
-): void {
-  const pump = pipe_relay();
-  let isClosing = false;
+      // send response header
+      socket.send(new Uint8Array([vless.version, 0]));
 
-  const remoteStream = {
-    readable: remote.readable,
-    writable: remote.writable,
-  };
-
-  function cleanup(): void {
-    if (!isClosing) {
-      isClosing = true;
-      try {
-        remote.close();
-      } catch (err) {
+      // send remaining payload
+      if (vless.rest.length > 0) {
+        await conn.write(vless.rest);
       }
-    }
-  }
 
-  const uploader = pump(client.readable, remoteStream.writable, vless.data)
-    .catch((err) => {
-    })
-    .finally(cleanup);
+      // pipe remote → ws
+      (async () => {
+        const buffer = new Uint8Array(4096);
+        while (true) {
+          const n = await conn.read(buffer);
+          if (!n) break;
+          socket.send(buffer.slice(0, n));
+        }
+        socket.close();
+        conn.close();
+      })();
 
-  const downloader = pump(remoteStream.readable, client.writable, vless.resp)
-    .catch((err) => {
-    });
-
-  downloader.finally(() => uploader).finally(cleanup);
-}
-
-const sessions = new Map<string, Session>();
-
-class Session {
-  uuid: string;
-  nextSeq: number = 0;
-  downstreamStarted: boolean = false;
-  lastActivity: number = Date.now();
-  vlessHeader: any = null;
-  remote: Deno.Conn | null = null;
-  initialized: boolean = false;
-  responseHeader: Uint8Array | null = null;
-  headerSent: boolean = false;
-  bufferedData: Map<number, Uint8Array> = new Map();
-  cleaned: boolean = false;
-  pendingPackets: Uint8Array[] = [];
-  currentStreamRes: { writable: WritableStream<Uint8Array> } | null = null;
-  pendingBuffers: Map<number, Uint8Array> = new Map();
-
-  constructor(uuid: string) {
-    this.uuid = uuid;
-  }
-
-  async initializeVLESS(firstPacket: Uint8Array): Promise<boolean> {
-    if (this.initialized) return true;
-
-    try {
-      const readable = new ReadableStream({
-        start(controller) {
-          controller.enqueue(firstPacket);
-          controller.close();
-        },
-      });
-
-      const client = {
-        readable,
-        writable: new WritableStream(),
+      // pipe ws → remote
+      socket.onmessage = async (ev) => {
+        await conn.write(new Uint8Array(ev.data));
       };
 
-      this.vlessHeader = await parse_header(SETTINGS.UUID, client);
-      this.remote = await connect_remote(this.vlessHeader.hostname, this.vlessHeader.port);
-      this.initialized = true;
-      return true;
+      socket.onclose = () => {
+        conn.close();
+      };
     } catch (err) {
-      return false;
+      socket.close();
     }
-  }
-
-  async processPacket(seq: number, data: Uint8Array): Promise<boolean> {
-    try {
-      this.pendingBuffers.set(seq, data);
-
-      while (this.pendingBuffers.has(this.nextSeq)) {
-        const nextData = this.pendingBuffers.get(this.nextSeq)!;
-        this.pendingBuffers.delete(this.nextSeq);
-
-        if (!this.initialized && this.nextSeq === 0) {
-          if (!await this.initializeVLESS(nextData)) {
-            throw new Error("Failed to initialize VLESS connection");
-          }
-          this.responseHeader = this.vlessHeader.resp;
-          await this._writeToRemote(this.vlessHeader.data);
-
-          if (this.currentStreamRes) {
-            this._startDownstreamResponse();
-          }
-        } else {
-          if (!this.initialized) {
-            continue;
-          }
-          await this._writeToRemote(nextData);
-        }
-
-        this.nextSeq++;
-      }
-
-      if (this.pendingBuffers.size > SETTINGS.MAX_BUFFERED_POSTS) {
-        throw new Error("Too many buffered packets");
-      }
-
-      return true;
-    } catch (err) {
-      throw err;
-    }
-  }
-
-  startDownstream(res: { writable: WritableStream<Uint8Array> }): boolean {
-    this.currentStreamRes = res;
-    if (this.initialized && this.responseHeader) {
-      this._startDownstreamResponse();
-    }
-    return true;
-  }
-
-  async _writeToRemote(data: Uint8Array): Promise<void> {
-    if (!this.remote) {
-      throw new Error("Remote connection not available");
-    }
-    const writer = this.remote.writable.getWriter();
-    await writer.write(data);
-    writer.releaseLock();
-  }
-
-  _startDownstreamResponse(): void {
-    if (!this.currentStreamRes || !this.responseHeader) return;
-
-    try {
-      const writer = this.currentStreamRes.writable.getWriter();
-      writer.write(this.responseHeader);
-      this.headerSent = true;
-      writer.releaseLock();
-
-      this.remote!.readable.pipeTo(this.currentStreamRes.writable).catch((err) => {
-      });
-    } catch (err) {
-      this.cleanup();
-    }
-  }
-
-  cleanup(): void {
-    if (!this.cleaned) {
-      this.cleaned = true;
-      if (this.remote) {
-        this.remote.close();
-        this.remote = null;
-      }
-      this.initialized = false;
-      this.headerSent = false;
-    }
-  }
-}
-
-let ISP = "";
-
-try {
-  const response = await fetch("https://speed.cloudflare.com/meta");
-  if (!response.ok) {
-    throw new Error(`HTTP error! status: ${response.status}`);
-  }
-  const data = await response.json() as {
-    country: string; 
-    asOrganization: string;
   };
-  ISP = `${data.country}-${data.asOrganization}`.replace(/ /g, "_");
-} catch (err) {
-  ISP = "unknown";
+
+  return response;
 }
 
-let IP = DOMAIN;
-if (!DOMAIN) {
-  try {
-    IP = await fetchIp("https://ipv4.ip.sb", 2000);
-  } catch (err) {
-    try {
-      IP = `[${await fetchIp("https://ipv6.ip.sb", 1000)}]`;
-    } catch (ipv6Err) {
-      IP = "localhost";
+// ---------------- Server ----------------
+
+serve(
+  async (req: Request) => {
+    const url = new URL(req.url);
+
+    if (url.pathname === "/") {
+      return new Response("VLESS WS Server Running\n");
     }
-  }
-}
 
-function generatePadding(min: number, max: number): string {
-  const length = min + Math.floor(Math.random() * (max - min));
-  return btoa(Array(length).fill("X").join(""));
-}
+    if (url.pathname === `/${SUB_PATH}`) {
+      const vless =
+        `vless://${UUID}@${DOMAIN}:443` +
+        `?encryption=none` +
+        `&security=tls` +
+        `&type=ws` +
+        `&host=${DOMAIN}` +
+        `&path=/${WS_PATH}` +
+        `&sni=${DOMAIN}` +
+        `#Deno-WS`;
+
+      return new Response(btoa(vless), {
+        headers: { "Content-Type": "text/plain" },
+      });
+    }
+
+    if (url.pathname === `/${WS_PATH}`) {
+      if (req.headers.get("upgrade") !== "websocket") {
+        return new Response("Expected WebSocket", { status: 400 });
+      }
+      return handleWS(req);
+    }
+
+    return new Response("Not Found", { status: 404 });
+  },
+  { port: PORT },
+);
+
+console.log(`Server running on port ${PORT}`);
 
 async function fetchIp(url: string, timeoutMs: number): Promise<string> {
   const response = await fetch(url, {
