@@ -1,7 +1,7 @@
 const UUID: string = Deno.env.get("UUID") || "f9a1ba12-7187-4b25-a5d5-7bafd82ffb4d";
 const SUB_PATH: string = Deno.env.get("SUB_PATH") || "sub";
 const XPATH: string = Deno.env.get("XPATH") || "xhttp";
-const DOMAIN: string = Deno.env.get("DOMAIN") || "nxhack.deno.dev";
+const DOMAIN: string = Deno.env.get("DOMAIN") || "denod.santanudhibar.deno.net";
 const NAME: string = Deno.env.get("NAME") || "Deno";
 const PORT: number = parseInt(Deno.env.get("PORT") || "3000");
 
