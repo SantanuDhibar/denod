@@ -382,22 +382,10 @@ try {
 let IP = DOMAIN;
 if (!DOMAIN) {
   try {
-    const response = await fetch("https://ipv4.ip.sb", {
-      signal: AbortSignal.timeout(2000),
-    });
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-    IP = (await response.text()).trim();
+    IP = await fetchIp("https://ipv4.ip.sb", 2000);
   } catch (err) {
     try {
-      const response = await fetch("https://ipv6.ip.sb", {
-        signal: AbortSignal.timeout(1000),
-      });
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      IP = `[${(await response.text()).trim()}]`;
+      IP = `[${await fetchIp("https://ipv6.ip.sb", 1000)}]`;
     } catch (ipv6Err) {
       IP = "localhost";
     }
@@ -409,10 +397,14 @@ function generatePadding(min: number, max: number): string {
   return btoa(Array(length).fill("X").join(""));
 }
 
-async function drainRequestBody(req: Request): Promise<void> {
-  if (req.body) {
-    await req.arrayBuffer();
+async function fetchIp(url: string, timeoutMs: number): Promise<string> {
+  const response = await fetch(url, {
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to fetch IP from ${url}: status ${response.status}`);
   }
+  return (await response.text()).trim();
 }
 
 const handler = async (req: Request): Promise<Response> => {
@@ -444,7 +436,9 @@ const handler = async (req: Request): Promise<Response> => {
 
     const isProxyPath = path.startsWith(`/${XPATH}/`);
     if (isProxyPath && !HAS_TCP) {
-      await drainRequestBody(req);
+      if (req.body) {
+        await req.arrayBuffer();
+      }
       return new Response("TCP proxying is not supported in this runtime.", { status: 501, headers: responseHeaders });
     }
 
@@ -517,4 +511,3 @@ const serveOptions: Deno.ServeOptions = {
 };
 
 Deno.serve(serveOptions, handler);
-    
