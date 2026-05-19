@@ -8,7 +8,7 @@ const DOMAIN = "denod.santanudhibar.deno.dev";
 const WS_PATH = "ws";
 const SUB_PATH = "sub";
 
-const PORT = 8000;
+const PORT = 3000;
 
 // ---------------- UUID utils ----------------
 
