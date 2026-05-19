@@ -204,8 +204,6 @@ function pipe_relay() {
         preventCancel: false,
         signal: controller.signal,
       });
-    } catch (err) {
-      throw err;
     } finally {
       clearTimeout(timeoutId);
     }
@@ -448,7 +446,7 @@ const handler = async (req: Request): Promise<Response> => {
   }
 
   if (IS_DENO_DEPLOY) {
-    return new Response("TCP proxy functionality via the xhttp endpoint is not supported on Deno Deploy", { status: 501 });
+    return new Response("TCP proxy functionality is not supported on Deno Deploy", { status: 501 });
   }
 
   const uuid = pathMatch[1];
