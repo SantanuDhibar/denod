@@ -5,8 +5,8 @@ const DOMAIN: string = Deno.env.get("DOMAIN") || "nxhack.deno.dev";         // T
 const NAME: string = Deno.env.get("NAME") || "Deno";         // name
 const PORT_ENV: string | undefined = Deno.env.get("PORT");
 const PORT: number = parseInt(PORT_ENV || "3000"); 
-const IS_DEPLOY: boolean = Deno.env.get("DENO_DEPLOYMENT_ID") !== undefined;
-const HAS_TCP: boolean = !IS_DEPLOY && typeof Deno.connect === "function";
+const IS_DENO_DEPLOY: boolean = Deno.env.get("DENO_DEPLOYMENT_ID") !== undefined;
+const HAS_TCP: boolean = !IS_DENO_DEPLOY && typeof Deno.connect === "function";
 
 interface Settings {
   UUID: string;
@@ -414,7 +414,7 @@ const handler = async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const path = url.pathname;
 
-    const headers = {
+    const responseHeaders = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST",
       "Cache-Control": "no-store",
@@ -442,7 +442,7 @@ const handler = async (req: Request): Promise<Response> => {
       return new Response("Not Found", { status: 404 });
     }
     if (!HAS_TCP) {
-      return new Response("TCP proxying is not supported in this runtime.", { status: 501, headers });
+      return new Response("TCP proxying is not supported in this runtime.", { status: 501, headers: responseHeaders });
     }
 
     const uuid = pathMatch[1];
@@ -462,7 +462,7 @@ const handler = async (req: Request): Promise<Response> => {
       return new Response(readable, {
         status: 200,
         headers: {
-          ...headers,
+          ...responseHeaders,
           "Content-Type": "application/octet-stream",
           "Transfer-Encoding": "chunked",
         },
@@ -489,7 +489,7 @@ const handler = async (req: Request): Promise<Response> => {
 
       try {
         await session.processPacket(seq, buffer);
-        return new Response(null, { status: 200, headers });
+        return new Response(null, { status: 200, headers: responseHeaders });
       } catch (err) {
         session.cleanup();
         sessions.delete(uuid);
@@ -499,11 +499,9 @@ const handler = async (req: Request): Promise<Response> => {
     return new Response("Not Found", { status: 404 });
   };
 
-if (PORT_ENV) {
-  Deno.serve({ port: PORT, onListen: () => {
+const serveOptions = PORT_ENV ? { port: PORT, onListen: () => {
     console.log(`Server is running on port ${PORT}`);
-  } }, handler);
-} else {
-  Deno.serve(handler);
-}
+  } } : {};
+
+Deno.serve(serveOptions, handler);
     
